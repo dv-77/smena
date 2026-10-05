@@ -21,16 +21,18 @@
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 html, body { margin: 0; padding: 0; background: var(--sec); color: var(--text); font: 16px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
 body { min-height: 100dvh; }
-#app { min-height: 100dvh; padding-bottom: calc(var(--tab-h) + env(safe-area-inset-bottom, 0px)); }
+#app { min-height: 100dvh; padding-bottom: env(safe-area-inset-bottom, 0px); }
+body.has-tabs #app { padding-bottom: calc(var(--tab-h) + env(safe-area-inset-bottom, 0px)); }
 
 .top {
   padding: calc(10px + var(--tg-content-safe-area-inset-top, env(safe-area-inset-top, 0px))) 16px 12px;
   background: var(--sec);
+  max-width: 520px;
 }
 .top h1 { margin: 0; font-size: 28px; font-weight: 720; letter-spacing: -0.03em; }
 .top .sub { color: var(--hint); font-size: 14px; margin-top: 4px; }
 
-.wrap { padding: 0 16px 24px; }
+.wrap { padding: 0 16px 24px; max-width: 520px; }
 .group {
   background: var(--section);
   border-radius: var(--radius);
@@ -77,8 +79,8 @@ body { min-height: 100dvh; }
 .danger { color: var(--danger); }
 .accent { color: var(--accent); }
 
-.cal-nav { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
-.cal-nav b { font-size: 18px; }
+.cal-nav { display: grid; grid-template-columns: 44px 1fr 44px; align-items: center; margin-bottom: 8px; }
+.cal-nav b { font-size: 18px; text-align: center; }
 .cal-nav button, .icon-btn {
   background: var(--section); color: var(--accent); border: 0; border-radius: 10px;
   padding: 8px 12px; font: inherit; font-weight: 600; cursor: pointer;
@@ -86,6 +88,7 @@ body { min-height: 100dvh; }
 .week { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; margin-bottom: 4px; }
 .week span { text-align: center; font-size: 11px; color: var(--hint); padding: 4px 0; }
 .grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+.grid.paint-on { touch-action: none; }
 .cell {
   aspect-ratio: 1; border-radius: 10px; display: flex; flex-direction: column;
   align-items: center; justify-content: center; font-size: 14px; font-weight: 600;
@@ -160,7 +163,7 @@ textarea { min-height: 88px; resize: vertical; }
 .statline { display: flex; justify-content: space-between; padding: 6px 0; font-size: 15px; }
 .statline span:last-child { font-variant-numeric: tabular-nums; font-weight: 600; }
 
-.wiz { padding: 24px 16px 40px; }
+.wiz { padding: 24px 16px 40px; max-width: 520px; }
 .wiz h1 { font-size: 28px; margin: 0 0 8px; letter-spacing: -0.03em; }
 .wiz p { color: var(--hint); margin: 0 0 20px; }
 .preset { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 16px; }

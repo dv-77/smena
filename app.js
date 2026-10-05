@@ -98,6 +98,22 @@
     setTimeout(function () { if (S.toast === t) { S.toast = ""; render(); } }, 1800);
   }
 
+  function lockClose(on) {
+    if (!TG) return;
+    try {
+      if (on && TG.enableClosingConfirmation) TG.enableClosingConfirmation();
+      else if (!on && TG.disableClosingConfirmation) TG.disableClosingConfirmation();
+    } catch (e) {}
+  }
+
+  function confirmTg(msg, yes) {
+    if (TG && TG.showConfirm) {
+      TG.showConfirm(msg, function (ok) { if (ok) yes(); });
+      return;
+    }
+    if (window.confirm(msg)) yes();
+  }
+
   function typeLabel(id) {
     for (var i = 0; i < TYPES.length; i++) if (TYPES[i].id === id) return TYPES[i].label;
     return "—";
@@ -143,47 +159,107 @@
     return Promise.resolve(true);
   }
 
+  function wrapVal(val) {
+    var packed = JSON.stringify({ t: Date.now(), d: val });
+    // ponytail: CloudStorage 4096 bytes; drop envelope if month+notes tight
+    return packed.length > 4000 ? val : packed;
+  }
+
+  function unwrapVal(s) {
+    if (!s) return { t: 0, d: "" };
+    try {
+      var o = JSON.parse(s);
+      if (o && typeof o === "object" && typeof o.t === "number" && typeof o.d === "string") return o;
+    } catch (e) {}
+    return { t: 0, d: s };
+  }
+
+  function pickStored(parts) {
+    var i, u, best = "", bestT = -1, anyT = false;
+    for (i = 0; i < parts.length; i++) {
+      u = unwrapVal(parts[i]);
+      if (u.t > 0) anyT = true;
+      if (u.t >= bestT && u.d) { bestT = u.t; best = u.d; }
+    }
+    if (anyT) return best;
+    for (i = 0; i < parts.length; i++) if (parts[i]) return parts[i];
+    return "";
+  }
+
   function readKey(key) {
-    return getCloud(key).catch(function () { return ""; }).then(function (v) {
-      if (v) return v;
-      return getDev(key).catch(function () { return ""; });
-    }).then(function (d) {
-      if (d) return d;
-      return localGet(key);
-    });
+    return Promise.all([
+      getCloud(key).catch(function () { return ""; }),
+      getDev(key).catch(function () { return ""; }),
+      localGet(key)
+    ]).then(pickStored);
   }
 
   function writeKey(key, val) {
-    localSet(key, val);
-    setDev(key, val).catch(function () {});
-    return setCloud(key, val).catch(function () {});
+    var packed = wrapVal(val);
+    localSet(key, packed);
+    setDev(key, packed).catch(function () {});
+    return setCloud(key, packed).catch(function () {});
+  }
+
+  function delKey(key) {
+    delete localMem[key];
+    try { localStorage.setItem("smena", JSON.stringify(localMem)); } catch (e) {}
+    callStore(ds(), "removeItem", [key]).catch(function () {});
+    return callStore(cs(), "removeItem", [key]).catch(function () {});
+  }
+
+  function listMonthKeys() {
+    var jobs = [
+      cs() && cs().getKeys ? callStore(cs(), "getKeys", []).catch(function () { return []; }) : Promise.resolve([]),
+      ds() && ds().getKeys ? callStore(ds(), "getKeys", []).catch(function () { return []; }) : Promise.resolve([])
+    ];
+    return Promise.all(jobs).then(function (arr) {
+      var set = {};
+      function add(keys) {
+        (keys || []).forEach(function (k) { if (String(k).indexOf("m-") === 0) set[k] = 1; });
+      }
+      add(arr[0]);
+      add(arr[1]);
+      add(Object.keys(localMem));
+      return Object.keys(set);
+    });
   }
 
   var saveTimer = null;
   function scheduleSave() {
     clearTimeout(saveTimer);
     saveTimer = setTimeout(flush, 400);
+    lockClose(true);
   }
 
   function flush() {
+    var snap = Object.keys(S.dirtyMonths);
     var jobs = [
       writeKey("cfg", JSON.stringify(S.cfg)),
       writeKey("pay", JSON.stringify(S.pays)),
       writeKey("docs", JSON.stringify(S.docs)),
       writeKey("pack", JSON.stringify(S.pack))
     ];
-    Object.keys(S.dirtyMonths).forEach(function (mk) {
+    snap.forEach(function (mk) {
       var chunk = {};
       Object.keys(S.days).forEach(function (iso) {
         if (monthKey(iso) === mk) chunk[iso] = S.days[iso];
       });
       jobs.push(writeKey(mk, JSON.stringify(chunk)));
     });
-    S.dirtyMonths = {};
-    return Promise.all(jobs);
+    return Promise.all(jobs).then(function () {
+      snap.forEach(function (k) { delete S.dirtyMonths[k]; });
+      if (!Object.keys(S.dirtyMonths).length) lockClose(false);
+    });
   }
 
   function markDay(iso) { S.dirtyMonths[monthKey(iso)] = 1; }
+
+  function monthsFromDays(days) {
+    var set = {};
+    Object.keys(days || {}).forEach(function (iso) { set[monthKey(iso)] = 1; });
+    return Object.keys(set);
+  }
 
   function parseJson(s, fallback) {
     if (!s) return fallback;
@@ -197,18 +273,9 @@
       S.pays = parseJson(base[1], []) || [];
       S.docs = parseJson(base[2], []) || [];
       S.pack = parseJson(base[3], []) || [];
-      var keysP;
-      if (cs() && cs().getKeys) {
-        keysP = callStore(cs(), "getKeys", []).catch(function () { return Object.keys(localMem); });
-      } else keysP = Promise.resolve(Object.keys(localMem));
-      return keysP;
-    }).then(function (keys) {
-      keys = keys || [];
-      var months = keys.filter(function (k) { return k.indexOf("m-") === 0; });
-      if (!months.length) {
-        months = Object.keys(localMem).filter(function (k) { return k.indexOf("m-") === 0; });
-      }
-      return Promise.all(months.map(function (k) {
+      return listMonthKeys();
+    }).then(function (months) {
+      return Promise.all((months || []).map(function (k) {
         return readKey(k).then(function (v) {
           var o = parseJson(v, {});
           Object.keys(o).forEach(function (iso) { S.days[iso] = o[iso]; });
@@ -261,6 +328,9 @@
 
   /* ---------- render ---------- */
   function render() {
+    var tabsOn = !!(S.cfg.setup && !S.page);
+    document.body.classList.toggle("has-tabs", tabsOn);
+    document.body.classList.toggle("wiz-on", !S.cfg.setup);
     if (!S.cfg.setup) {
       $.innerHTML = renderWizard();
     } else if (S.page) {
@@ -312,6 +382,9 @@
       html += ringSvg(p);
       html += '<div class="big"><em>' + p.remain + "</em> " + nextLabel + "</div>";
       html += '<div class="muted">день ' + p.elapsed + " из " + p.total + "</div>";
+    } else if (p.next) {
+      html += '<div class="big"><em>' + p.remain + "</em> " + nextLabel + "</div>";
+      html += '<div class="muted">сегодня не отмечен — открой календарь</div>';
     } else {
       html += '<div class="big">Нет графика</div><div class="muted">Нарисуй дни на вкладке Календарь</div>';
     }
@@ -363,6 +436,13 @@
     }
     var packLeft = S.pack.filter(function (x) { return !x.done; }).length;
     if (n && n.days <= 2 && packLeft) out.push({ t: "Сборы", s: "осталось " + packLeft });
+    var last = P.lastMarked(S.days);
+    if (last) {
+      var leftG = Math.round((P.parseIso(last) - today) / 86400000);
+      if (leftG <= 21) {
+        out.push({ t: "График кончается", s: leftG < 0 ? "закончился — расставь ещё" : "ещё " + leftG + " дн." });
+      }
+    }
     return out;
   }
 
@@ -406,7 +486,7 @@
     html += '<button class="chip' + (S.paint ? " on" : "") + '" data-act="toggle-paint">' + (S.paint ? "Кисть вкл" : "Кисть") + "</button>";
     html += "</div>";
     html += '<div class="week">' + WEEK.map(function (w) { return "<span>" + w + "</span>"; }).join("") + "</div>";
-    html += '<div class="grid">' + cells.join("") + "</div>";
+    html += '<div class="grid' + (S.paint ? " paint-on" : "") + '">' + cells.join("") + "</div>";
     html += '<div class="legend"><span><i style="background:var(--accent)"></i>вахта</span><span><i style="background:var(--hint)"></i>дом</span><span><i style="background:var(--travel)"></i>путь</span><span><i style="background:var(--rest)"></i>вых.</span></div>';
     html += '<div class="group" style="margin-top:16px">';
     html += '<div class="row tap" data-act="gen"><div class="lbl">Расставить график<small>' + S.cfg.work + "/" + S.cfg.rest + " с выбранной даты</small></div><div class=\"chev\">›</div></div>";
@@ -435,6 +515,7 @@
     var html = '<div class="top"><h1>Деньги</h1><div class="sub">оценка по твоим ставкам, не расчётка</div></div><div class="wrap">';
     html += '<div class="hero"><div class="st">Этот месяц</div><div class="big money">' + rub(month.net) + "</div>";
     if (S.cfg.goalMonth) html += '<div class="muted">цель ' + rub(S.cfg.goalMonth) + goalPct(month.net) + "</div>";
+    html += '<div class="muted">РК и северная — на тариф, ночные и праздники. Вахтовая без них (ПП 344).</div>';
     html += "</div>";
     if (vahta && p.onSite) {
       html += groupStats("Текущая вахта", vahta);
@@ -489,7 +570,11 @@
     html += rowTap("Ставка и надбавки", (S.cfg.rate ? rub(S.cfg.rate) : "не задана") + " / " + (S.cfg.payMode === "hourly" ? "час" : "день"), "page", "payset");
     html += rowTap("График", S.cfg.work + "/" + S.cfg.rest, "page", "graphset");
     html += rowTap("Документы", S.docs.length ? String(S.docs.length) : "пусто", "page", "docs");
-    html += rowTap("Сборы", S.pack.filter(function (x) { return !x.done; }).length + " осталось", "page", "pack");
+    html += rowTap("Сборы", (function () {
+      var left = S.pack.filter(function (x) { return !x.done; }).length;
+      if (!S.pack.length) return "пусто";
+      return left ? left + " осталось" : "всё собрано";
+    })(), "page", "pack");
     html += "</div><div class=\"group\">";
     html += '<div class="row tap" data-act="share"><div class="lbl">Написать семье статус</div><div class="chev">›</div></div>';
     html += rowTap("Бэкап", "JSON", "page", "backup");
@@ -525,6 +610,7 @@
     html += numField(S.cfg.payMode === "hourly" ? "Ставка, ₽/час" : "Ставка, ₽/сутки", "rate", "100");
     html += '<div class="pair"><div class="field"><label>Начало смены</label><input data-cfg="shiftStart" type="time" value="' + esc(S.cfg.shiftStart) + '"></div><div class="field"><label>Конец смены</label><input data-cfg="shiftEnd" type="time" value="' + esc(S.cfg.shiftEnd) + '"></div></div>';
     html += numField("Часов в смене", "hoursPerShift", "0.5");
+    html += '<p class="muted" style="margin:0 0 12px">Часы — для ставки. Время смены — только ночные 22:00–06:00.</p>';
     html += numField("Неоплачиваемый перерыв, мин", "unpaidBreakMin");
     html += numField("Ночные, %", "nightPct");
     html += numField("Праздник, множитель", "holidayMult", "0.1");
@@ -599,7 +685,7 @@
       html += "</div><div class=\"pair\"><div class=\"field\"><label>Свои рабочие</label><input id=\"wwork\" type=\"number\" value=\"" + wip.work + "\"></div><div class=\"field\"><label>Свои дом</label><input id=\"wrest\" type=\"number\" value=\"" + wip.rest + "\"></div></div>";
       html += '<button class="btn" data-act="wiz" data-arg="3">Дальше</button>';
     } else if (w === 3) {
-      html += "<h1>Старт цикла</h1><p>Первый день текущей вахты или ближайшей</p>";
+      html += "<h1>Старт цикла</h1><p>" + (wip.now === "home" ? "Дата ближайшего заезда. До неё отметим дом." : "Первый день текущей вахты") + "</p>";
       html += '<div class="field"><label>Дата</label><input id="wstart" type="date" value="' + esc(wip.start || todayIso()) + '"></div>';
       html += '<div class="field"><label>Сейчас</label><select id="wnow">' + opt("work", "На вахте", wip.now) + opt("home", "Дома", wip.now) + "</select></div>";
       html += '<button class="btn" data-act="wiz" data-arg="4">Дальше</button>';
@@ -610,13 +696,18 @@
       html += '<button class="btn" data-act="wiz" data-arg="5">Дальше</button>';
     } else if (w === 5) {
       html += "<h1>Ставка</h1><p>Как в расчётке. Потом поправишь</p>";
-      html += '<div class="field"><label>Тип</label><select id="wmode"><option value="daily">За сутки</option><option value="hourly">За час</option></select></div>';
+      html += '<div class="field"><label>Тип</label><select id="wmode">' + opt("daily", "За сутки", wip.payMode) + opt("hourly", "За час", wip.payMode) + "</select></div>";
       html += '<div class="field"><label>Сумма, ₽</label><input id="wrate" type="number" value="' + esc(wip.rate) + '"></div>';
       html += '<div class="field"><label>Часов в смене</label><input id="whours" type="number" step="0.5" value="' + esc(wip.hours) + '"></div>';
       html += '<button class="btn" data-act="wiz" data-arg="6">Дальше</button>';
     } else if (w === 6) {
       html += "<h1>Надбавки</h1><p>Вахтовая — без районного и северной. Так по ПП 344.</p>";
-      html += '<div class="field"><label>Вахтовая</label><select id="wbonus"><option value="75">75% Крайний Север</option><option value="50">50% Сибирь / ДВ</option><option value="30">30% прочие</option><option value="0">Нет</option></select></div>';
+      html += '<div class="field"><label>Вахтовая</label><select id="wbonus">' +
+        opt("75", "75% Крайний Север", wip.bonus) +
+        opt("50", "50% Сибирь / ДВ", wip.bonus) +
+        opt("30", "30% прочие", wip.bonus) +
+        opt("0", "Нет", wip.bonus) +
+        "</select></div>";
       html += '<div class="field"><label>Районный коэффициент</label><input id="wrk" type="number" step="0.01" value="' + esc(wip.rk) + '"></div>';
       html += '<div class="field"><label>Северная, %</label><input id="wnorth" type="number" value="' + esc(wip.north) + '"></div>';
       html += '<button class="btn" data-act="wiz" data-arg="7">Готово</button>';
@@ -695,7 +786,24 @@
     if (!S.cfg.setup && S.wiz > 1) { S.wiz -= 1; render(); }
   }
 
-  /* ---------- events ---------- */
+  function applyPaint(btn) {
+    if (!btn || btn.getAttribute("data-act") !== "cell") return;
+    var iso = btn.getAttribute("data-arg");
+    if (!iso) return;
+    var cur = S.days[iso] ? Object.assign({}, S.days[iso]) : {};
+    cur.t = S.brush;
+    setDay(iso, cur);
+    var off = btn.classList.contains("off");
+    btn.className = "cell" + (off ? " off" : "") + (iso === todayIso() ? " today" : "") + " t-" + S.brush;
+    var dot = btn.querySelector(".dot");
+    if (!dot) {
+      dot = document.createElement("span");
+      btn.appendChild(dot);
+    }
+    dot.className = "dot t-" + S.brush;
+  }
+
+  var painting = false;
   function val(id) {
     var el = document.getElementById(id);
     return el ? el.value : "";
@@ -728,6 +836,10 @@
     S.cfg.setup = true;
     var start = S.wip.start || todayIso();
     var gen = P.generateRotation({ start: start, work: S.cfg.work, rest: S.cfg.rest, months: 12, travelOn: S.cfg.travelOn });
+    if (S.wip.now === "home" && todayIso() < start) {
+      var until = P.iso(P.addDays(P.parseIso(start), -1));
+      P.eachDate(todayIso(), until, function (key) { gen[key] = { t: "h" }; });
+    }
     S.days = gen;
     Object.keys(gen).forEach(markDay);
     if (!S.pack.length) {
@@ -775,8 +887,7 @@
     else if (act === "toggle-paint") { S.paint = !S.paint; render(); }
     else if (act === "cell") {
       if (S.paint) {
-        setDay(arg, { t: S.brush });
-        render();
+        applyPaint(t);
       } else {
         S.sheet = { k: "day", iso: arg };
         render();
@@ -794,7 +905,7 @@
       cur.h = h === "" ? null : Number(h);
       cur.n = n === "" ? null : Number(n);
       cur.extra = x === "" ? 0 : Number(x);
-      cur.note = val("dnote");
+      cur.note = val("dnote").slice(0, 200);
       if (!cur.t) cur.t = "w";
       setDay(S.sheet.iso, cur);
       S.sheet = null;
@@ -823,9 +934,11 @@
       S.sheet = null;
       render();
     } else if (act === "del-pay") {
-      S.pays = S.pays.filter(function (x) { return x.id !== arg; });
-      scheduleSave();
-      render();
+      confirmTg("Удалить запись?", function () {
+        S.pays = S.pays.filter(function (x) { return x.id !== arg; });
+        scheduleSave();
+        render();
+      });
     } else if (act === "add-doc") { S.sheet = { k: "doc" }; render(); }
     else if (act === "save-doc") {
       S.docs.push({ id: "d" + Date.now(), n: val("dn") || "Документ", exp: val("de") });
@@ -833,9 +946,11 @@
       S.sheet = null;
       render();
     } else if (act === "del-doc") {
-      S.docs = S.docs.filter(function (x) { return x.id !== arg; });
-      scheduleSave();
-      render();
+      confirmTg("Удалить документ?", function () {
+        S.docs = S.docs.filter(function (x) { return x.id !== arg; });
+        scheduleSave();
+        render();
+      });
     } else if (act === "toggle-pack") {
       S.pack.forEach(function (p) { if (p.id === arg) p.done = !p.done; });
       scheduleSave();
@@ -862,34 +977,67 @@
         toast("Скопировано");
       }
     } else if (act === "do-restore") {
-      try {
-        var data = JSON.parse(val("restore"));
-        if (!data || !data.cfg) throw new Error("bad");
-        S.cfg = Object.assign(defCfg(), data.cfg);
-        S.days = data.days || {};
-        S.pays = data.pays || [];
-        S.docs = data.docs || [];
-        S.pack = data.pack || [];
-        Object.keys(S.days).forEach(markDay);
-        scheduleSave();
-        flush();
-        S.page = null;
-        toast("Восстановлено");
-        render();
-      } catch (err) { toast("Непонятный JSON"); }
+      confirmTg("Заменить все данные этой копией?", function () {
+        try {
+          var data = JSON.parse(val("restore"));
+          if (!data || !data.cfg) throw new Error("bad");
+          listMonthKeys().then(function (oldKeys) {
+            S.cfg = Object.assign(defCfg(), data.cfg);
+            S.days = data.days || {};
+            S.pays = data.pays || [];
+            S.docs = data.docs || [];
+            S.pack = data.pack || [];
+            Object.keys(S.days).forEach(markDay);
+            var keep = monthsFromDays(S.days);
+            (oldKeys || []).forEach(function (k) {
+              if (keep.indexOf(k) === -1) delKey(k);
+            });
+            scheduleSave();
+            flush();
+            S.page = null;
+            toast("Восстановлено");
+            render();
+          });
+        } catch (err) { toast("Непонятный JSON"); }
+      });
     }
+  });
+
+  $.addEventListener("pointerdown", function (e) {
+    if (!S.paint || S.page || S.sheet) return;
+    var cell = e.target.closest("[data-act=cell]");
+    if (!cell) return;
+    painting = true;
+    applyPaint(cell);
+    haptic("light");
+    e.preventDefault();
+  });
+  window.addEventListener("pointermove", function (e) {
+    if (!painting) return;
+    var el = document.elementFromPoint(e.clientX, e.clientY);
+    var cell = el && el.closest && el.closest("[data-act=cell]");
+    if (cell) applyPaint(cell);
+  });
+  window.addEventListener("pointerup", function () {
+    painting = false;
+  });
+  window.addEventListener("pointercancel", function () {
+    painting = false;
   });
 
   $.addEventListener("change", function (e) {
     var el = e.target;
-    if (!el.dataset.cfg) return;
+    if (!el.dataset.cfg) {
+      if (el.id === "wnow") { grabWiz(); render(); }
+      return;
+    }
     var key = el.dataset.cfg;
     var v = el.value;
     if (el.type === "number" || key === "rk" || key === "vahtaBonusPct" || key === "ndfl" || key === "travelOn" || key === "travelCountsAsWork") {
       if (key === "ndfl" || key === "travelOn" || key === "travelCountsAsWork") S.cfg[key] = v === "1" || v === "true";
       else S.cfg[key] = Number(v);
     } else S.cfg[key] = v;
-    if (key === "shiftStart" || key === "shiftEnd") {
+    if (key === "shiftStart" || key === "shiftEnd" || key === "unpaidBreakMin") {
       S.cfg.hoursPerShift = P.shiftLength(S.cfg.shiftStart, S.cfg.shiftEnd, S.cfg.unpaidBreakMin);
     }
     scheduleSave();
@@ -905,7 +1053,7 @@
       navigator.clipboard.writeText(line).then(function () { toast("Текст скопирован — кинь семье"); });
     } else toast(line);
     if (TG && TG.openTelegramLink) {
-      TG.openTelegramLink("https://t.me/share/url?url=&text=" + encodeURIComponent(line));
+      TG.openTelegramLink("https://t.me/share/url?url=" + encodeURIComponent("https://t.me/smena_tekoji_bot") + "&text=" + encodeURIComponent(line));
     }
   }
 
@@ -913,14 +1061,26 @@
     if (TG) {
       TG.ready();
       TG.expand();
-      try { TG.requestFullscreen && TG.requestFullscreen(); } catch (e) {}
+      try {
+        var plat = TG.platform || "";
+        if (TG.requestFullscreen && (plat === "ios" || plat === "android" || plat === "android_x")) {
+          TG.requestFullscreen();
+        }
+      } catch (e) {}
       TG.setHeaderColor && TG.setHeaderColor("secondary_bg_color");
       TG.setBackgroundColor && TG.setBackgroundColor("secondary_bg_color");
       if (TG.BackButton) TG.BackButton.onClick(onBack);
       if (TG.disableVerticalSwipes) TG.disableVerticalSwipes();
+      if (TG.onEvent) {
+        TG.onEvent("themeChanged", function () {
+          TG.setHeaderColor && TG.setHeaderColor("secondary_bg_color");
+          TG.setBackgroundColor && TG.setBackgroundColor("secondary_bg_color");
+        });
+      }
     }
     loadAll().then(function () {
       if (!S.ym) S.ym = { y: new Date().getFullYear(), m: new Date().getMonth() };
+      if (S.cfg.setup) lockClose(true);
       render();
     }).catch(function () {
       render();
