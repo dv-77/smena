@@ -12,28 +12,15 @@
     { id: "s", label: "Больничный" },
     { id: "v", label: "Отпуск" }
   ];
-  var PRESETS = [
-    [15, 15], [14, 14], [30, 30], [45, 15], [60, 30], [20, 10]
-  ];
   var WEEK = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"];
   var MONTHS = ["январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"];
-  var PACK_DEF = [
-    "Паспорт и документы",
-    "Медкнижка / направление",
-    "СИЗ и рабочая одежда",
-    "Зарядка и пауэрбанк",
-    "Лекарства",
-    "Гигиена",
-    "Наличные / карта",
-    "Связь / SIM"
-  ];
 
   function defCfg() {
     return {
-      v: 2,
-      work: 15,
-      rest: 15,
-      travelOn: true,
+      v: 4,
+      work: 0,
+      rest: 0,
+      travelOn: false,
       travelCountsAsWork: false,
       payMode: "daily",
       rate: 0,
@@ -67,8 +54,6 @@
     ym: null,
     brush: "w",
     paint: false,
-    wiz: 1,
-    wip: { work: 15, rest: 15, start: "", now: "work", travelOn: true, payMode: "daily", rate: "", hours: 11 },
     toast: "",
     dirtyMonths: {}
   };
@@ -170,19 +155,20 @@
   function getDev(key) { return callStore(ds(), "getItem", [key]).then(function (v) { return v || ""; }); }
   function setDev(key, val) { return callStore(ds(), "setItem", [key, val]); }
 
-  var localMem = {};
-  try { localMem = JSON.parse(localStorage.getItem("smena") || "{}") || {}; } catch (e) { localMem = {}; }
+  var NS = "s4-";
+  var LOCAL = "smena-s4";
 
-  function localGet(key) { return Promise.resolve(localMem[key] || ""); }
-  function localSet(key, val) {
-    localMem[key] = val;
-    try { localStorage.setItem("smena", JSON.stringify(localMem)); } catch (e) {}
-    return Promise.resolve(true);
+  function full(key) { return NS + key; }
+
+  var localMem = {};
+  try { localMem = JSON.parse(localStorage.getItem(LOCAL) || "{}") || {}; } catch (e) { localMem = {}; }
+
+  function persistLocal() {
+    try { localStorage.setItem(LOCAL, JSON.stringify(localMem)); } catch (e) {}
   }
 
   function wrapVal(val) {
     var packed = JSON.stringify({ t: Date.now(), d: val });
-    // ponytail: CloudStorage 4096 bytes; drop envelope if month+notes tight
     return packed.length > 4000 ? val : packed;
   }
 
@@ -207,29 +193,34 @@
     return "";
   }
 
-  function readKey(key) {
+  function readRaw(raw) {
     return Promise.all([
-      getCloud(key).catch(function () { return ""; }),
-      getDev(key).catch(function () { return ""; }),
-      localGet(key)
+      getCloud(raw).catch(function () { return ""; }),
+      getDev(raw).catch(function () { return ""; }),
+      Promise.resolve(localMem[raw] || "")
     ]).then(pickStored);
   }
 
+  function readKey(key) { return readRaw(full(key)); }
+
   function writeKey(key, val) {
     var packed = wrapVal(val);
-    localSet(key, packed);
-    setDev(key, packed).catch(function () {});
-    return setCloud(key, packed).catch(function () {});
+    localMem[full(key)] = packed;
+    persistLocal();
+    setDev(full(key), packed).catch(function () {});
+    return setCloud(full(key), packed).catch(function () {});
   }
 
-  function delKey(key) {
-    delete localMem[key];
-    try { localStorage.setItem("smena", JSON.stringify(localMem)); } catch (e) {}
-    callStore(ds(), "removeItem", [key]).catch(function () {});
-    return callStore(cs(), "removeItem", [key]).catch(function () {});
+  function delRaw(raw) {
+    delete localMem[raw];
+    persistLocal();
+    callStore(ds(), "removeItem", [raw]).catch(function () {});
+    return callStore(cs(), "removeItem", [raw]).catch(function () {});
   }
 
-  function listMonthKeys() {
+  function delKey(key) { return delRaw(full(key)); }
+
+  function listRawKeys() {
     var jobs = [
       cs() && cs().getKeys ? callStore(cs(), "getKeys", []).catch(function () { return []; }) : Promise.resolve([]),
       ds() && ds().getKeys ? callStore(ds(), "getKeys", []).catch(function () { return []; }) : Promise.resolve([])
@@ -237,12 +228,42 @@
     return Promise.all(jobs).then(function (arr) {
       var set = {};
       function add(keys) {
-        (keys || []).forEach(function (k) { if (String(k).indexOf("m-") === 0) set[k] = 1; });
+        (keys || []).forEach(function (k) { if (k) set[k] = 1; });
       }
       add(arr[0]);
       add(arr[1]);
       add(Object.keys(localMem));
       return Object.keys(set);
+    });
+  }
+
+  function listMonthKeys() {
+    return listRawKeys().then(function (keys) {
+      var out = [];
+      var p = NS + "m-";
+      keys.forEach(function (k) {
+        if (String(k).indexOf(p) === 0) out.push(k.slice(NS.length));
+      });
+      return out;
+    });
+  }
+
+  function wipeForeign() {
+    try { localStorage.removeItem("smena"); } catch (e) {}
+    return listRawKeys().then(function (keys) {
+      return Promise.all(keys.filter(function (k) {
+        return String(k).indexOf(NS) !== 0;
+      }).map(delRaw));
+    });
+  }
+
+  function wipeEverything() {
+    try { localStorage.removeItem("smena"); } catch (e) {}
+    return listRawKeys().then(function (keys) {
+      return Promise.all(keys.map(delRaw));
+    }).then(function () {
+      localMem = {};
+      persistLocal();
     });
   }
 
@@ -287,23 +308,25 @@
     try { return JSON.parse(s); } catch (e) { return fallback; }
   }
 
+  function emptyState() {
+    S.cfg = defCfg();
+    S.cfg.setup = true;
+    S.days = {};
+    S.pays = [];
+    S.docs = [];
+    S.pack = [];
+    S.dirtyMonths = {};
+    S.page = null;
+    S.sheet = null;
+    S.tab = "home";
+  }
+
   function loadAll() {
-    return Promise.all([readKey("cfg"), readKey("pay"), readKey("docs"), readKey("pack")]).then(function (base) {
+    return wipeForeign().then(function () {
+      return Promise.all([readKey("cfg"), readKey("pay"), readKey("docs"), readKey("pack")]);
+    }).then(function (base) {
       var cfg = parseJson(base[0], null);
-      if (cfg && typeof cfg === "object") {
-        var oldV = cfg.v || 1;
-        S.cfg = Object.assign(defCfg(), cfg);
-        if (oldV < 2 && Number(cfg.rk) === 1.7 && Number(cfg.northPct) === 80 && Number(cfg.vahtaBonusPct) === 75) {
-          S.cfg.rk = 1;
-          S.cfg.northPct = 0;
-          S.cfg.vahtaBonusPct = 0;
-          S.cfg.ndfl = false;
-        }
-        if (oldV < 2) {
-          S.cfg.v = 2;
-          scheduleSave();
-        }
-      }
+      if (cfg && typeof cfg === "object") S.cfg = Object.assign(defCfg(), cfg);
       S.pays = parseJson(base[1], []) || [];
       S.docs = parseJson(base[2], []) || [];
       S.pack = parseJson(base[3], []) || [];
@@ -424,17 +447,19 @@
     }
     html += "</div>";
 
-    html += '<div class="group">';
+    var homeRows = "";
     if (today) {
       var todayVal = typeLabel(today.t);
       if (td) todayVal += " · " + rub(td.labor);
-      html += rowTap("Сегодня", todayVal, "open-day", iso);
+      homeRows += rowTap("Сегодня", todayVal, "open-day", iso);
     }
-    if (p.onSite) {
-      html += '<div class="row tap" data-act="go-money"><div class="lbl">Эта вахта<small>' + esc(byRateLine(vs)) + '</small></div><div class="val money">' + esc(headlinePay(vs)) + '</div><div class="chev">›</div></div>';
+    if (p.onSite && (Number(S.cfg.rate) || vs.workDays)) {
+      homeRows += '<div class="row tap" data-act="go-money"><div class="lbl">Эта вахта<small>' + esc(byRateLine(vs)) + '</small></div><div class="val money">' + esc(headlinePay(vs)) + '</div><div class="chev">›</div></div>';
     }
-    html += '<div class="row tap" data-act="go-money"><div class="lbl">Месяц<small>' + esc(byRateLine(ms)) + (S.cfg.goalMonth ? goalPct(ms.net) : "") + '</small></div><div class="val money">' + esc(headlinePay(ms)) + '</div><div class="chev">›</div></div>';
-    html += "</div>";
+    if (Number(S.cfg.rate) || ms.workDays) {
+      homeRows += '<div class="row tap" data-act="go-money"><div class="lbl">Месяц<small>' + esc(byRateLine(ms)) + (S.cfg.goalMonth ? goalPct(ms.net) : "") + '</small></div><div class="val money">' + esc(headlinePay(ms)) + '</div><div class="chev">›</div></div>';
+    }
+    if (homeRows) html += '<div class="group">' + homeRows + "</div>";
 
     if (warns.length) {
       html += '<div class="group">';
@@ -525,7 +550,7 @@
     html += '<div class="grid' + (S.paint ? " paint-on" : "") + '">' + cells.join("") + "</div>";
     html += '<div class="legend"><span><i style="background:var(--accent)"></i>вахта</span><span><i style="background:var(--hint)"></i>дом</span><span><i style="background:var(--travel)"></i>путь</span><span><i style="background:var(--rest)"></i>вых.</span></div>';
     html += '<div class="group" style="margin-top:16px">';
-    html += '<div class="row tap" data-act="gen"><div class="lbl">Расставить график<small>' + S.cfg.work + "/" + S.cfg.rest + " с выбранной даты</small></div><div class=\"chev\">›</div></div>";
+    html += '<div class="row tap" data-act="gen"><div class="lbl">Расставить график<small>' + (canAutoGen() ? S.cfg.work + "/" + S.cfg.rest + " с выбранной даты" : "сначала укажи рабочие и дом") + "</small></div><div class=\"chev\">›</div></div>";
     html += "</div></div>";
     return html;
   }
@@ -617,7 +642,7 @@
       if (S.cfg.ndfl) bits.push("НДФЛ");
       return bits.length ? t + " · " + bits.join(", ") : t;
     })(), "page", "payset");
-    html += rowTap("График", S.cfg.work + "/" + S.cfg.rest, "page", "graphset");
+    html += rowTap("График", S.cfg.work && S.cfg.rest ? S.cfg.work + "/" + S.cfg.rest : "не задан", "page", "graphset");
     html += rowTap("Документы", S.docs.length ? String(S.docs.length) : "пусто", "page", "docs");
     html += rowTap("Сборы", (function () {
       var left = S.pack.filter(function (x) { return !x.done; }).length;
@@ -628,6 +653,8 @@
     html += '<div class="row tap" data-act="share"><div class="lbl">Написать семье статус</div><div class="chev">›</div></div>';
     html += rowTap("Бэкап", "JSON", "page", "backup");
     html += '<div class="row tap" data-act="homescreen"><div class="lbl">На домашний экран</div><div class="chev">›</div></div>';
+    html += "</div><div class=\"group\">";
+    html += '<div class="row tap" data-act="hard-reset"><div class="lbl danger">Начать заново</div><div class="chev">›</div></div>';
     html += "</div></div>";
     return html;
   }
@@ -721,42 +748,7 @@
   }
 
   function renderWizard() {
-    var w = S.wiz;
-    var wip = S.wip;
-    var html = '<div class="wiz">';
-    if (w === 1) {
-      html += "<h1>Смена</h1><p>График вахты, дни до дома и оценка зарплаты. Для себя, в Telegram.</p>";
-      html += '<button class="btn" data-act="wiz" data-arg="2">Дальше</button>';
-    } else if (w === 2) {
-      html += "<h1>График</h1><p>Сколько дней вахта / дом</p><div class=\"preset\">";
-      PRESETS.forEach(function (pr) {
-        var on = wip.work === pr[0] && wip.rest === pr[1] ? " on" : "";
-        html += '<button class="' + on + '" data-act="preset" data-arg="' + pr[0] + "-" + pr[1] + '">' + pr[0] + " / " + pr[1] + "</button>";
-      });
-      html += "</div><div class=\"pair\"><div class=\"field\"><label>Свои рабочие</label><input id=\"wwork\" type=\"number\" value=\"" + wip.work + "\"></div><div class=\"field\"><label>Свои дом</label><input id=\"wrest\" type=\"number\" value=\"" + wip.rest + "\"></div></div>";
-      html += '<button class="btn" data-act="wiz" data-arg="3">Дальше</button>';
-    } else if (w === 3) {
-      html += "<h1>Старт цикла</h1><p>" + (wip.now === "home" ? "Дата ближайшего заезда. До неё отметим дом." : "Первый день текущей вахты") + "</p>";
-      html += '<div class="field"><label>Дата</label><input id="wstart" type="date" value="' + esc(wip.start || todayIso()) + '"></div>';
-      html += '<div class="field"><label>Сейчас</label><select id="wnow">' + opt("work", "На вахте", wip.now) + opt("home", "Дома", wip.now) + "</select></div>";
-      html += '<button class="btn" data-act="wiz" data-arg="4">Дальше</button>';
-    } else if (w === 4) {
-      html += "<h1>Дорога</h1><p>Заезд и выезд — отдельные дни в начале и конце вахты</p>";
-      html += '<button class="choice' + (wip.travelOn ? " on" : "") + '" data-act="wtravel" data-arg="1">Да, день пути</button>';
-      html += '<button class="choice' + (!wip.travelOn ? " on" : "") + '" data-act="wtravel" data-arg="0">Нет, сразу смена</button>';
-      html += '<button class="btn" data-act="wiz" data-arg="5">Дальше</button>';
-    } else if (w === 5) {
-      html += "<h1>Ставка</h1><p>Как в расчётке. Потом поправишь</p>";
-      html += '<div class="field"><label>Тип</label><select id="wmode">' + opt("daily", "За сутки", wip.payMode) + opt("hourly", "За час", wip.payMode) + "</select></div>";
-      html += '<div class="field"><label>Сумма, ₽</label><input id="wrate" type="number" value="' + esc(wip.rate) + '"></div>';
-      html += '<div class="field"><label>Часов в смене</label><input id="whours" type="number" step="0.5" value="' + esc(wip.hours) + '"></div>';
-      html += '<p class="muted">Районный, северная и вахтовая — потом в Ещё, если есть в расчётке. Сейчас только ставка × дни.</p>';
-      html += '<button class="btn" data-act="wiz" data-arg="7">Готово</button>';
-    } else {
-      html += "<h1>Готово</h1><p></p>";
-    }
-    html += "</div>";
-    return html;
+    return '<div class="wiz"><h1>Смена</h1><p>Пусто. График, ставку, сборы и документы заполняешь сам. Ничего заранее не расставляем.</p><button class="btn" data-act="wiz" data-arg="7">Открыть</button></div>';
   }
 
   function renderSheet() {
@@ -808,7 +800,14 @@
     return "<h2>Пункт сборов</h2><div class=\"field\"><label>Название</label><input id=\"pn\"></div><button class=\"btn\" data-act=\"save-pack\">Добавить</button>";
   }
 
+  function canAutoGen() {
+    return Number(S.cfg.work) >= 1 && Number(S.cfg.rest) >= 0;
+  }
+
   function sheetGen() {
+    if (!canAutoGen()) {
+      return "<h2>Расставить график</h2><p class=\"muted\">Сначала укажи рабочие и дом в Ещё → График.</p>";
+    }
     return "<h2>Расставить график</h2><p class=\"muted\">" + S.cfg.work + "/" + S.cfg.rest + ". Уже заполненные дни не трогаем.</p>" +
       '<div class="field"><label>С даты</label><input id="gs" type="date" value="' + todayIso() + '"></div>' +
       '<button class="btn" data-act="do-gen">Расставить 12 месяцев</button>';
@@ -816,7 +815,7 @@
 
   function bindBack() {
     if (!TG || !TG.BackButton) return;
-    if (S.sheet || S.page || (!S.cfg.setup && S.wiz > 1)) {
+    if (S.sheet || S.page) {
       TG.BackButton.show();
     } else TG.BackButton.hide();
   }
@@ -824,7 +823,6 @@
   function onBack() {
     if (S.sheet) { S.sheet = null; render(); return; }
     if (S.page) { S.page = null; render(); return; }
-    if (!S.cfg.setup && S.wiz > 1) { S.wiz -= 1; render(); }
   }
 
   function applyPaint(btn) {
@@ -850,41 +848,8 @@
     return el ? el.value : "";
   }
 
-  function grabWiz() {
-    if (document.getElementById("wwork")) S.wip.work = Number(val("wwork")) || S.wip.work;
-    if (document.getElementById("wrest")) S.wip.rest = Number(val("wrest")) || S.wip.rest;
-    if (document.getElementById("wstart")) S.wip.start = val("wstart");
-    if (document.getElementById("wnow")) S.wip.now = val("wnow");
-    if (document.getElementById("wmode")) S.wip.payMode = val("wmode");
-    if (document.getElementById("wrate")) S.wip.rate = val("wrate");
-    if (document.getElementById("whours")) S.wip.hours = Number(val("whours")) || 11;
-  }
-
   function finishWiz() {
-    grabWiz();
-    S.cfg.work = S.wip.work;
-    S.cfg.rest = S.wip.rest;
-    S.cfg.travelOn = S.wip.travelOn;
-    S.cfg.payMode = S.wip.payMode;
-    S.cfg.rate = Number(S.wip.rate) || 0;
-    S.cfg.hoursPerShift = S.wip.hours;
-    S.cfg.vahtaBonusPct = 0;
-    S.cfg.rk = 1;
-    S.cfg.northPct = 0;
-    S.cfg.ndfl = false;
-    S.cfg.v = 2;
-    S.cfg.setup = true;
-    var start = S.wip.start || todayIso();
-    var gen = P.generateRotation({ start: start, work: S.cfg.work, rest: S.cfg.rest, months: 12, travelOn: S.cfg.travelOn });
-    if (S.wip.now === "home" && todayIso() < start) {
-      var until = P.iso(P.addDays(P.parseIso(start), -1));
-      P.eachDate(todayIso(), until, function (key) { gen[key] = { t: "h" }; });
-    }
-    S.days = gen;
-    Object.keys(gen).forEach(markDay);
-    if (!S.pack.length) {
-      S.pack = PACK_DEF.map(function (n, i) { return { id: "p" + i, n: n, done: false }; });
-    }
+    emptyState();
     scheduleSave();
     flush();
     S.tab = "home";
@@ -909,16 +874,7 @@
     var arg = t.dataset.arg;
     haptic();
     if (act === "close-sheet") { S.sheet = null; render(); }
-    else if (act === "wiz") {
-      grabWiz();
-      if (arg === "7" || arg === "6") finishWiz();
-      else { S.wiz = Number(arg); render(); }
-    } else if (act === "preset") {
-      var pr = arg.split("-");
-      S.wip.work = Number(pr[0]);
-      S.wip.rest = Number(pr[1]);
-      render();
-    } else if (act === "wtravel") { S.wip.travelOn = arg === "1"; render(); }
+    else if (act === "wiz") finishWiz();
     else if (act === "go-money") { S.tab = "money"; render(); }
     else if (act === "page") { S.page = arg; render(); }
     else if (act === "prev-m") { S.ym.m -= 1; if (S.ym.m < 0) { S.ym.m = 11; S.ym.y -= 1; } render(); }
@@ -956,6 +912,7 @@
       render();
     } else if (act === "gen") { S.sheet = { k: "gen" }; render(); }
     else if (act === "do-gen") {
+      if (!canAutoGen()) { toast("Сначала укажи рабочие и дом"); return; }
       var gs = val("gs") || todayIso();
       var gen = P.generateRotation({ start: gs, work: S.cfg.work, rest: S.cfg.rest, months: 12, travelOn: S.cfg.travelOn });
       Object.keys(gen).forEach(function (iso) {
@@ -1016,6 +973,16 @@
         try { navigator.clipboard.writeText(ta.value); } catch (err) { document.execCommand("copy"); }
         toast("Скопировано");
       }
+    } else if (act === "hard-reset") {
+      confirmTg("Удалить все данные и начать с нуля?", function () {
+        wipeEverything().then(function () {
+          emptyState();
+          scheduleSave();
+          flush();
+          toast("Всё стёрто");
+          render();
+        });
+      });
     } else if (act === "do-restore") {
       confirmTg("Заменить все данные этой копией?", function () {
         try {
@@ -1067,10 +1034,7 @@
 
   $.addEventListener("change", function (e) {
     var el = e.target;
-    if (!el.dataset.cfg) {
-      if (el.id === "wnow") { grabWiz(); render(); }
-      return;
-    }
+    if (!el.dataset.cfg) return;
     var key = el.dataset.cfg;
     var v = el.value;
     if (el.type === "number" || key === "rk" || key === "vahtaBonusPct" || key === "ndfl" || key === "travelOn" || key === "travelCountsAsWork") {
