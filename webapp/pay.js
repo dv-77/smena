@@ -41,7 +41,8 @@
   function shiftIntervals(start, end) {
     var s = toMin(start);
     var e = toMin(end);
-    if (e === s) return [[s, s + 24 * 60]];
+    // ponytail: same clock = 24h wrap (linear [s, s+1440] misses 00:00–06:00 night)
+    if (e === s) return [[s, 24 * 60], [0, s]];
     if (e < s) return [[s, 24 * 60], [0, e]];
     return [[s, e]];
   }
@@ -128,8 +129,11 @@
       extras += Number(day.extra) || 0;
       if (!isPaidWork(day, cfg)) return;
       workDays += 1;
-      var h = day.h != null ? Number(day.h) : shiftLength(cfg.shiftStart, cfg.shiftEnd, cfg.unpaidBreakMin);
-      var n = day.n != null ? Number(day.n) : nightHours(cfg.shiftStart, cfg.shiftEnd);
+      var h;
+      if (day.h != null && day.h !== "") h = Number(day.h);
+      else if (cfg.payMode === "hourly") h = shiftLength(cfg.shiftStart, cfg.shiftEnd, cfg.unpaidBreakMin);
+      else h = Number(cfg.hoursPerShift) || shiftLength(cfg.shiftStart, cfg.shiftEnd, cfg.unpaidBreakMin);
+      var n = day.n != null && day.n !== "" ? Number(day.n) : nightHours(cfg.shiftStart, cfg.shiftEnd);
       if (n > h) n = h;
       hours += h;
       nightH += n;
@@ -188,8 +192,8 @@
       var key = iso(d);
       if (pos < work) {
         var t = "w";
-        if (travelOn && pos === 0) t = "to";
-        if (travelOn && pos === work - 1) t = "from";
+        if (travelOn && work >= 2 && pos === 0) t = "to";
+        if (travelOn && work >= 2 && pos === work - 1) t = "from";
         out[key] = { t: t };
       } else {
         out[key] = { t: "h" };
@@ -222,17 +226,28 @@
     return "empty";
   }
 
+  function isAway(day) {
+    return !!(day && day.t && day.t !== "h" && day.t !== "v");
+  }
+
+  function lastMarked(days) {
+    var keys = Object.keys(days);
+    if (!keys.length) return null;
+    keys.sort();
+    return keys[keys.length - 1];
+  }
+
   function cycleProgress(days, todayIso) {
     var today = days[todayIso];
     var st = statusOf(today);
-    var onSite = st === "work" || st === "to" || st === "from" || st === "rest";
+    var onSite = isAway(today);
     var d = parseIso(todayIso);
     var start = 0;
     for (var i = 0; i <= 90; i++) {
       var key = iso(addDays(d, -i));
       var day = days[key];
-      var site = day && SITE[day.t];
-      if (onSite ? !site : site) {
+      var away = isAway(day);
+      if (onSite ? !away : away) {
         start = i;
         break;
       }
@@ -286,10 +301,12 @@
     shiftLength: shiftLength,
     rates: rates,
     isPaidWork: isPaidWork,
+    isAway: isAway,
     summarize: summarize,
     generateRotation: generateRotation,
     nextChange: nextChange,
     statusOf: statusOf,
+    lastMarked: lastMarked,
     cycleProgress: cycleProgress,
     moneyInRange: moneyInRange,
     monthBounds: monthBounds,

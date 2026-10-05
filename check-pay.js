@@ -59,6 +59,29 @@ assert.strictEqual(rot["2026-10-03"].t, "h");
 assert.strictEqual(rot["2026-10-04"].t, "h");
 assert.strictEqual(rot["2026-10-05"].t, "to");
 
+assert.strictEqual(P.nightHours("08:00", "08:00"), 8);
+assert.strictEqual(P.shiftLength("08:00", "08:00", 60), 23);
+
+var one = P.generateRotation({ start: "2026-10-01", work: 1, rest: 1, months: 1, travelOn: true });
+assert.strictEqual(one["2026-10-01"].t, "w");
+assert.strictEqual(one["2026-10-02"].t, "h");
+
+var dailyMismatch = Object.assign({}, cfg, { hoursPerShift: 11, shiftStart: "08:00", shiftEnd: "19:00", unpaidBreakMin: 0 });
+var dm = P.summarize({ "2026-10-05": { t: "w" } }, dailyMismatch, "2026-10-05", "2026-10-05");
+assert.ok(Math.abs(dm.labor - 10000) < 0.01);
+assert.ok(Math.abs(dm.hours - 11) < 0.01);
+
+var sickDays = {
+  "2026-10-01": { t: "w" },
+  "2026-10-02": { t: "s" },
+  "2026-10-03": { t: "w" },
+  "2026-10-04": { t: "h" }
+};
+var sickCyc = P.cycleProgress(sickDays, "2026-10-02");
+assert.strictEqual(sickCyc.onSite, true);
+assert.strictEqual(sickCyc.elapsed, 2);
+assert.strictEqual(sickCyc.remain, 2);
+
 var cyc = P.cycleProgress(rot, "2026-10-01");
 assert.strictEqual(cyc.onSite, true);
 assert.strictEqual(cyc.elapsed, 1);
