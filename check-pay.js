@@ -46,6 +46,14 @@ assert.ok(Math.abs(s.northAmt - basePlus * 0.8) < 0.01);
 assert.ok(Math.abs(s.bonus - 3 * 10000 * 0.75) < 0.01);
 assert.ok(s.gross > s.net);
 
+var plain = Object.assign({}, cfg, { vahtaBonusPct: 0, rk: 1, northPct: 0, ndfl: false });
+var ps = P.summarize({ "2026-10-05": { t: "w" }, "2026-10-06": { t: "w" } }, plain, "2026-10-05", "2026-10-06");
+assert.strictEqual(ps.workDays, 2);
+assert.ok(Math.abs(ps.labor - 20000) < 0.01);
+assert.ok(Math.abs(ps.net - 20000) < 0.01);
+assert.ok(Math.abs(ps.rkAmt) < 0.01);
+assert.ok(Math.abs(ps.bonus) < 0.01);
+
 var nightCfg = Object.assign({}, cfg, { payMode: "hourly", rate: 1000, shiftStart: "20:00", shiftEnd: "08:00", unpaidBreakMin: 0 });
 var ns = P.summarize({ "2026-10-05": { t: "w" } }, nightCfg, "2026-10-05", "2026-10-05");
 assert.strictEqual(ns.hours, 12);

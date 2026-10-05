@@ -30,7 +30,7 @@
 
   function defCfg() {
     return {
-      v: 1,
+      v: 2,
       work: 15,
       rest: 15,
       travelOn: true,
@@ -43,10 +43,10 @@
       unpaidBreakMin: 60,
       nightPct: 20,
       holidayMult: 2,
-      vahtaBonusPct: 75,
-      rk: 1.7,
-      northPct: 80,
-      ndfl: true,
+      vahtaBonusPct: 0,
+      rk: 1,
+      northPct: 0,
+      ndfl: false,
       ndflPct: 13,
       goalMonth: 0,
       warnDocsDays: 30,
@@ -68,7 +68,7 @@
     brush: "w",
     paint: false,
     wiz: 1,
-    wip: { work: 15, rest: 15, start: "", now: "work", travelOn: true, payMode: "daily", rate: "", hours: 11, bonus: 75, rk: 1.7, north: 80 },
+    wip: { work: 15, rest: 15, start: "", now: "work", travelOn: true, payMode: "daily", rate: "", hours: 11 },
     toast: "",
     dirtyMonths: {}
   };
@@ -86,6 +86,27 @@
   function rub(n) {
     n = Math.round(Number(n) || 0);
     return n.toLocaleString("ru-RU") + " ₽";
+  }
+
+  function payExtras(s) {
+    return (s.rkAmt || 0) + (s.northAmt || 0) + (s.bonus || 0) + (s.nightPay || 0) + (s.holidayExtra || 0) + (s.extras || 0);
+  }
+
+  function ratePhrase() {
+    if (!Number(S.cfg.rate)) return "";
+    return rub(S.cfg.rate) + (S.cfg.payMode === "hourly" ? "/ч" : "");
+  }
+
+  function byRateLine(s) {
+    if (!Number(S.cfg.rate)) return "ставку не задали";
+    if (S.cfg.payMode === "hourly") return s.hours.toFixed(1) + " ч × " + ratePhrase();
+    return s.workDays + " × " + ratePhrase();
+  }
+
+  function headlinePay(s) {
+    if (!Number(S.cfg.rate)) return "ставку не задали";
+    if (payExtras(s) < 0.5 && !S.cfg.ndfl) return rub(s.labor);
+    return rub(s.net);
   }
 
   function haptic(k) {
@@ -269,7 +290,20 @@
   function loadAll() {
     return Promise.all([readKey("cfg"), readKey("pay"), readKey("docs"), readKey("pack")]).then(function (base) {
       var cfg = parseJson(base[0], null);
-      if (cfg && typeof cfg === "object") S.cfg = Object.assign(defCfg(), cfg);
+      if (cfg && typeof cfg === "object") {
+        var oldV = cfg.v || 1;
+        S.cfg = Object.assign(defCfg(), cfg);
+        if (oldV < 2 && Number(cfg.rk) === 1.7 && Number(cfg.northPct) === 80 && Number(cfg.vahtaBonusPct) === 75) {
+          S.cfg.rk = 1;
+          S.cfg.northPct = 0;
+          S.cfg.vahtaBonusPct = 0;
+          S.cfg.ndfl = false;
+        }
+        if (oldV < 2) {
+          S.cfg.v = 2;
+          scheduleSave();
+        }
+      }
       S.pays = parseJson(base[1], []) || [];
       S.docs = parseJson(base[2], []) || [];
       S.pack = parseJson(base[3], []) || [];
@@ -393,11 +427,13 @@
     html += '<div class="group">';
     if (today) {
       var todayVal = typeLabel(today.t);
-      if (td) todayVal += " · " + rub(td.net);
+      if (td) todayVal += " · " + rub(td.labor);
       html += rowTap("Сегодня", todayVal, "open-day", iso);
     }
-    if (p.onSite) html += rowTap("Эта вахта", vs.workDays + " дн · " + rub(vs.net), "go-money");
-    html += rowTap("Месяц", rub(ms.net) + (S.cfg.goalMonth ? goalPct(ms.net) : ""), "go-money");
+    if (p.onSite) {
+      html += '<div class="row tap" data-act="go-money"><div class="lbl">Эта вахта<small>' + esc(byRateLine(vs)) + '</small></div><div class="val money">' + esc(headlinePay(vs)) + '</div><div class="chev">›</div></div>';
+    }
+    html += '<div class="row tap" data-act="go-money"><div class="lbl">Месяц<small>' + esc(byRateLine(ms)) + (S.cfg.goalMonth ? goalPct(ms.net) : "") + '</small></div><div class="val money">' + esc(headlinePay(ms)) + '</div><div class="chev">›</div></div>';
     html += "</div>";
 
     if (warns.length) {
@@ -477,7 +513,7 @@
     }
     var mb = P.monthBounds(y, m);
     var ms = sumRange(mb.from, mb.to);
-    var html = '<div class="top"><h1>Календарь</h1><div class="sub money">' + ms.workDays + " раб. · " + rub(ms.net) + "</div></div><div class=\"wrap\">";
+    var html = '<div class="top"><h1>Календарь</h1><div class="sub money">' + ms.workDays + " раб. · " + headlinePay(ms) + "</div></div><div class=\"wrap\">";
     html += '<div class="cal-nav"><button data-act="prev-m">‹</button><b>' + MONTHS[m] + " " + y + "</b><button data-act=\"next-m\">›</button></div>";
     html += '<div class="brush">';
     TYPES.forEach(function (t) {
@@ -512,10 +548,11 @@
     var year = sumRange(yb.from, yb.to);
     var vahta = p.onSite || p.status !== "empty" ? sumRange(vb.from, vb.to) : null;
     var payM = P.moneyInRange(S.pays, mb.from, mb.to);
-    var html = '<div class="top"><h1>Деньги</h1><div class="sub">оценка по твоим ставкам, не расчётка</div></div><div class="wrap">';
-    html += '<div class="hero"><div class="st">Этот месяц</div><div class="big money">' + rub(month.net) + "</div>";
+    var html = '<div class="top"><h1>Деньги</h1><div class="sub">оценка, не расчётка</div></div><div class="wrap">';
+    html += '<div class="hero"><div class="st">Этот месяц</div><div class="big money">' + headlinePay(month) + "</div>";
+    html += '<div class="muted">' + esc(byRateLine(month)) + "</div>";
+    if (payExtras(month) >= 0.5) html += '<div class="muted">ниже — из чего сложилось</div>';
     if (S.cfg.goalMonth) html += '<div class="muted">цель ' + rub(S.cfg.goalMonth) + goalPct(month.net) + "</div>";
-    html += '<div class="muted">РК и северная — на тариф, ночные и праздники. Вахтовая без них (ПП 344).</div>';
     html += "</div>";
     if (vahta && p.onSite) {
       html += groupStats("Текущая вахта", vahta);
@@ -523,9 +560,10 @@
     html += groupStats("Месяц", month);
     html += groupStats("Год", year);
     html += '<div class="group">';
-    html += '<div class="row"><div class="lbl">Пришло</div><div class="val money">' + rub(payM.got) + "</div></div>";
-    html += '<div class="row"><div class="lbl">Траты</div><div class="val money">' + rub(payM.spent) + "</div></div>";
-    html += '<div class="row"><div class="lbl">Начислено − пришло</div><div class="val money">' + rub(month.net - payM.got) + "</div></div>";
+    if (S.pays.length) {
+      html += '<div class="row"><div class="lbl">Пришло</div><div class="val money">' + rub(payM.got) + "</div></div>";
+      html += '<div class="row"><div class="lbl">Траты</div><div class="val money">' + rub(payM.spent) + "</div></div>";
+    }
     html += '<div class="row tap" data-act="add-pay"><div class="lbl">Записать выплату или трату</div><div class="chev">›</div></div>';
     html += "</div>";
     if (S.pays.length) {
@@ -541,25 +579,27 @@
   }
 
   function groupStats(title, s) {
+    var extra = payExtras(s) >= 0.5 || S.cfg.ndfl;
     var rows = [
-      ["Часы", s.hours.toFixed(1)],
-      ["Рабочих дней", s.workDays],
-      ["Дней на объекте", s.siteDays],
-      ["Тариф", rub(s.labor)],
-      ["Ночные", rub(s.nightPay)],
-      ["Праздники", rub(s.holidayExtra)],
-      ["РК", rub(s.rkAmt)],
-      ["Северная", rub(s.northAmt)],
-      ["Вахтовая надбавка", rub(s.bonus)],
-      s.extras ? ["Доплаты вручную", rub(s.extras)] : null,
-      ["Грязными", rub(s.gross)],
-      S.cfg.ndfl ? ["НДФЛ", rub(s.tax)] : null,
-      ["На руки", rub(s.net)]
+      ["Рабочих дней", String(s.workDays)],
+      s.siteDays !== s.workDays ? ["Дней на объекте", String(s.siteDays)] : null,
+      ["По ставке", extra ? rub(s.labor) : byRateLine(s) + " = " + rub(s.labor)]
     ];
+    if (s.nightPay) rows.push(["Ночные 22:00–06:00", rub(s.nightPay)]);
+    if (s.holidayExtra) rows.push(["Праздники ×" + (S.cfg.holidayMult || 2), rub(s.holidayExtra)]);
+    if (s.rkAmt) rows.push(["Районный " + S.cfg.rk, rub(s.rkAmt)]);
+    if (s.northAmt) rows.push(["Северная " + S.cfg.northPct + "%", rub(s.northAmt)]);
+    if (s.bonus) rows.push(["Вахтовая " + S.cfg.vahtaBonusPct + "% × " + s.siteDays + " дн", rub(s.bonus)]);
+    if (s.extras) rows.push(["Доплаты вручную", rub(s.extras)]);
+    if (extra) {
+      rows.push(["Всего", rub(s.gross)]);
+      if (S.cfg.ndfl) rows.push(["НДФЛ " + (S.cfg.ndflPct || 13) + "%", rub(s.tax)]);
+      rows.push([S.cfg.ndfl ? "На руки" : "Итого", rub(s.net)]);
+    }
     var html = '<div class="group"><div class="head-row">' + esc(title) + "</div>";
     rows.forEach(function (r) {
       if (!r) return;
-      html += '<div class="row"><div class="lbl">' + r[0] + '</div><div class="val money">' + r[1] + "</div></div>";
+      html += '<div class="row"><div class="lbl">' + esc(r[0]) + '</div><div class="val money">' + esc(String(r[1])) + "</div></div>";
     });
     html += "</div>";
     return html;
@@ -567,7 +607,16 @@
 
   function renderMore() {
     var html = '<div class="top"><h1>Ещё</h1></div><div class="wrap"><div class="group">';
-    html += rowTap("Ставка и надбавки", (S.cfg.rate ? rub(S.cfg.rate) : "не задана") + " / " + (S.cfg.payMode === "hourly" ? "час" : "день"), "page", "payset");
+    html += rowTap("Ставка и надбавки", (function () {
+      if (!S.cfg.rate) return "не задана";
+      var t = rub(S.cfg.rate) + " / " + (S.cfg.payMode === "hourly" ? "час" : "сутки");
+      var bits = [];
+      if (Number(S.cfg.rk) > 1) bits.push("РК " + S.cfg.rk);
+      if (Number(S.cfg.northPct)) bits.push("север " + S.cfg.northPct + "%");
+      if (Number(S.cfg.vahtaBonusPct)) bits.push("вахтовая " + S.cfg.vahtaBonusPct + "%");
+      if (S.cfg.ndfl) bits.push("НДФЛ");
+      return bits.length ? t + " · " + bits.join(", ") : t;
+    })(), "page", "payset");
     html += rowTap("График", S.cfg.work + "/" + S.cfg.rest, "page", "graphset");
     html += rowTap("Документы", S.docs.length ? String(S.docs.length) : "пусто", "page", "docs");
     html += rowTap("Сборы", (function () {
@@ -621,8 +670,10 @@
       opt("75", "75% Крайний Север", S.cfg.vahtaBonusPct) +
       "</select></div>";
     html += numField("Районный коэффициент", "rk", "0.01");
+    html += '<p class="muted" style="margin:-4px 0 12px">1 — без районного. 1.7 — типичный север.</p>';
     html += numField("Северная надбавка, %", "northPct");
-    html += '<div class="field"><label>НДФЛ</label><select data-cfg="ndfl">' + opt("1", "13% показывать", S.cfg.ndfl ? 1 : 0) + opt("0", "Не вычитать", S.cfg.ndfl ? 1 : 0) + "</select></div>";
+    html += '<p class="muted" style="margin:-4px 0 12px">0 — нет. Включается только если есть в расчётке.</p>';
+    html += '<div class="field"><label>НДФЛ</label><select data-cfg="ndfl">' + opt("0", "Не вычитать", S.cfg.ndfl ? 1 : 0) + opt("1", "13% показать", S.cfg.ndfl ? 1 : 0) + "</select></div>";
     html += numField("Цель на месяц, ₽", "goalMonth", "1000");
     html += "</div></div>";
     return html;
@@ -699,17 +750,7 @@
       html += '<div class="field"><label>Тип</label><select id="wmode">' + opt("daily", "За сутки", wip.payMode) + opt("hourly", "За час", wip.payMode) + "</select></div>";
       html += '<div class="field"><label>Сумма, ₽</label><input id="wrate" type="number" value="' + esc(wip.rate) + '"></div>';
       html += '<div class="field"><label>Часов в смене</label><input id="whours" type="number" step="0.5" value="' + esc(wip.hours) + '"></div>';
-      html += '<button class="btn" data-act="wiz" data-arg="6">Дальше</button>';
-    } else if (w === 6) {
-      html += "<h1>Надбавки</h1><p>Вахтовая — без районного и северной. Так по ПП 344.</p>";
-      html += '<div class="field"><label>Вахтовая</label><select id="wbonus">' +
-        opt("75", "75% Крайний Север", wip.bonus) +
-        opt("50", "50% Сибирь / ДВ", wip.bonus) +
-        opt("30", "30% прочие", wip.bonus) +
-        opt("0", "Нет", wip.bonus) +
-        "</select></div>";
-      html += '<div class="field"><label>Районный коэффициент</label><input id="wrk" type="number" step="0.01" value="' + esc(wip.rk) + '"></div>';
-      html += '<div class="field"><label>Северная, %</label><input id="wnorth" type="number" value="' + esc(wip.north) + '"></div>';
+      html += '<p class="muted">Районный, северная и вахтовая — потом в Ещё, если есть в расчётке. Сейчас только ставка × дни.</p>';
       html += '<button class="btn" data-act="wiz" data-arg="7">Готово</button>';
     } else {
       html += "<h1>Готово</h1><p></p>";
@@ -817,9 +858,6 @@
     if (document.getElementById("wmode")) S.wip.payMode = val("wmode");
     if (document.getElementById("wrate")) S.wip.rate = val("wrate");
     if (document.getElementById("whours")) S.wip.hours = Number(val("whours")) || 11;
-    if (document.getElementById("wbonus")) S.wip.bonus = Number(val("wbonus"));
-    if (document.getElementById("wrk")) S.wip.rk = Number(val("wrk")) || 1;
-    if (document.getElementById("wnorth")) S.wip.north = Number(val("wnorth")) || 0;
   }
 
   function finishWiz() {
@@ -830,9 +868,11 @@
     S.cfg.payMode = S.wip.payMode;
     S.cfg.rate = Number(S.wip.rate) || 0;
     S.cfg.hoursPerShift = S.wip.hours;
-    S.cfg.vahtaBonusPct = S.wip.bonus;
-    S.cfg.rk = S.wip.rk;
-    S.cfg.northPct = S.wip.north;
+    S.cfg.vahtaBonusPct = 0;
+    S.cfg.rk = 1;
+    S.cfg.northPct = 0;
+    S.cfg.ndfl = false;
+    S.cfg.v = 2;
     S.cfg.setup = true;
     var start = S.wip.start || todayIso();
     var gen = P.generateRotation({ start: start, work: S.cfg.work, rest: S.cfg.rest, months: 12, travelOn: S.cfg.travelOn });
@@ -871,7 +911,7 @@
     if (act === "close-sheet") { S.sheet = null; render(); }
     else if (act === "wiz") {
       grabWiz();
-      if (arg === "7") finishWiz();
+      if (arg === "7" || arg === "6") finishWiz();
       else { S.wiz = Number(arg); render(); }
     } else if (act === "preset") {
       var pr = arg.split("-");
@@ -1049,12 +1089,11 @@
     var map = { work: "на вахте", home: "дома", to: "в заезде", from: "в выезде", rest: "выходной на вахте", sick: "на больничном", vac: "в отпуске", empty: "график не отмечен" };
     var line = "Сейчас " + (map[p.status] || "") + ".";
     if (p.next) line += " " + (p.onSite ? "Дома " : "На вахте ") + fmtDay(p.next.date) + ", осталось " + p.next.days + " дн.";
-    if (navigator.clipboard && navigator.clipboard.writeText) {
+    if (navigator.share) {
+      navigator.share({ text: line }).catch(function () {});
+    } else if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(line).then(function () { toast("Текст скопирован — кинь семье"); });
     } else toast(line);
-    if (TG && TG.openTelegramLink) {
-      TG.openTelegramLink("https://t.me/share/url?url=" + encodeURIComponent("https://t.me/smena_tekoji_bot") + "&text=" + encodeURIComponent(line));
-    }
   }
 
   function boot() {
